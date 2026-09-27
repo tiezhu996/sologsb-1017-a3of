@@ -38,6 +38,7 @@ import {
   Keyboard,
   NavigateBefore,
   NavigateNext,
+  Palette,
   Redo,
   Reply,
   Save,
@@ -45,7 +46,7 @@ import {
   Undo,
   WarningAmber
 } from '@mui/icons-material'
-import { diffScript, useContinuityStore } from './store'
+import { diffScript, REVISION_SEQUENCE, useContinuityStore } from './store'
 import type { RevisionColor, Scene, WarningItem, WarningStatus } from './types'
 
 const revisionOptions: Array<{ value: RevisionColor; label: string; color: string }> = [
@@ -62,6 +63,7 @@ const revisionOptions: Array<{ value: RevisionColor; label: string; color: strin
 const dayNightOptions = ['白天', '夜', '清晨', '黄昏', '傍晚']
 const timePeriods = ['白天', '夜', '清晨', '黄昏', '傍晚']
 const searchFields = ['slug', 'synopsis', 'location', 'storyTime', 'reason'] as const
+const revisionLabel = (value: RevisionColor) => revisionOptions.find((option) => option.value === value)?.label ?? value
 
 function Highlight({ text, query }: { text: string; query: string }) {
   if (!query.trim()) return <>{text}</>
@@ -106,8 +108,9 @@ export default function App() {
   const store = useContinuityStore()
   const { state, warnings } = store
   const [selectedSceneId, setSelectedSceneId] = useState(state.script.scenes[0]?.id ?? '')
-  const [view, setView] = useState<'outline' | 'detail' | 'warnings' | 'versions'>('outline')
+  const [view, setView] = useState<'outline' | 'detail' | 'batches' | 'warnings' | 'versions'>('outline')
   const [query, setQuery] = useState('')
+  const [selectedBatchId, setSelectedBatchId] = useState('')
   const [libraryOpen, setLibraryOpen] = useState(false)
   const [libraryTab, setLibraryTab] = useState('characters')
   const [versionDialog, setVersionDialog] = useState(false)
@@ -119,6 +122,7 @@ export default function App() {
   const searchRef = useRef<HTMLInputElement>(null)
 
   const selectedScene = state.script.scenes.find((scene) => scene.id === selectedSceneId) ?? state.script.scenes[0]
+  const activeBatch = state.batches.find((batch) => batch.id === state.activeBatchId) ?? null
   const pendingWarnings = warnings.filter((warning) => (state.reviews[warning.id]?.status ?? 'pending') === 'pending')
   const visibleWarnings = warnings.filter((warning) => warningFilter === 'all' || (state.reviews[warning.id]?.status ?? 'pending') === warningFilter)
   const selectedVersion = state.versions.find((version) => version.id === selectedVersionId) ?? state.versions[0]
@@ -257,7 +261,7 @@ export default function App() {
               <MenuItem value="review">待审</MenuItem>
               <MenuItem value="locked">锁定</MenuItem>
             </TextField>
-            <TextField select label="修订颜色" value={selectedScene.revision} disabled={locked} onChange={(event) => store.updateScene(selectedScene.id, 'revision', event.target.value as RevisionColor)}>
+            <TextField select label="修订颜色" value={selectedScene.revision} disabled={locked || !!activeBatch} helperText={activeBatch ? `批次「${revisionLabel(activeBatch.color)}」进行中，修订色由批次自动分配` : undefined} onChange={(event) => store.updateScene(selectedScene.id, 'revision', event.target.value as RevisionColor)}>
               {revisionOptions.map((option) => <MenuItem key={option.value} value={option.value}><span className={`revision-swatch revision-${option.value}`} />{option.label}</MenuItem>)}
             </TextField>
             <TextField className="span-2" multiline minRows={3} label="场景摘要" value={selectedScene.synopsis} disabled={locked} onChange={(event) => store.updateScene(selectedScene.id, 'synopsis', event.target.value)} />
@@ -411,6 +415,65 @@ export default function App() {
     )
   }
 
+  function renderBatches() {
+    const lastColor = state.batches.length ? state.batches[state.batches.length - 1].color : 'white'
+    const upcomingColor = REVISION_SEQUENCE[(REVISION_SEQUENCE.indexOf(lastColor) + 1) % REVISION_SEQUENCE.length]
+    const selectedBatch = state.batches.find((batch) => batch.id === selectedBatchId) ?? activeBatch ?? state.batches[state.batches.length - 1] ?? null
+    const selectedScenes = selectedBatch ? state.script.scenes.filter((scene) => selectedBatch.sceneIds.includes(scene.id)) : []
+    const deletedCount = selectedBatch ? selectedBatch.sceneIds.length - selectedScenes.length : 0
+    return (
+      <Box>
+        <Stack direction={{ xs: 'column', sm: 'row' }} justifyContent="space-between" gap={2} mb={2}>
+          <Box>
+            <Typography className="eyebrow">REVISION BATCHES</Typography>
+            <Typography variant="h4">修订批次</Typography>
+            <Typography color="text.secondary">每开一批按白纸、蓝、粉、黄、绿、金菊、浅黄、鲑粉、樱桃的次序换色；批内动过的场次自动着色，同一场反复修改只计一次。</Typography>
+          </Box>
+          <Button variant="contained" startIcon={<Palette />} onClick={() => setSelectedBatchId(store.startRevisionBatch().id)}>开始新批次（{revisionLabel(upcomingColor)}）</Button>
+        </Stack>
+        {activeBatch && (
+          <Alert severity="info" icon={<span className={`revision-swatch revision-${activeBatch.color}`} />} sx={{ mb: 2 }}>
+            当前批次「{revisionLabel(activeBatch.color)}」进行中，始于 {new Date(activeBatch.startedAt).toLocaleString('zh-CN')}，本批已改 {activeBatch.sceneIds.length} 场；期间修改的场次会自动带上该颜色。
+          </Alert>
+        )}
+        <Box className="version-layout">
+          <Paper className="version-list" elevation={0}>
+            <Typography variant="h6">批次列表</Typography>
+            <List disablePadding>
+              {state.batches.map((batch, index) => (
+                <ListItemButton key={batch.id} selected={batch.id === selectedBatch?.id} onClick={() => setSelectedBatchId(batch.id)}>
+                  <Stack direction="row" gap={1.2} alignItems="center">
+                    <span className={`revision-swatch revision-${batch.color}`} />
+                    <Box>
+                      <Typography fontWeight={700}>第 {index + 1} 批 · {revisionLabel(batch.color)}{batch.id === state.activeBatchId ? '（进行中）' : ''}</Typography>
+                      <Typography variant="caption" color="text.secondary">{new Date(batch.startedAt).toLocaleString('zh-CN')} · 改过 {batch.sceneIds.length} 场</Typography>
+                    </Box>
+                  </Stack>
+                </ListItemButton>
+              ))}
+            </List>
+            {!state.batches.length && <Typography color="text.secondary" mt={2}>还没有修订批次。点击“开始新批次”，第一批使用蓝色。</Typography>}
+          </Paper>
+          <Paper className="diff-panel" elevation={0}>
+            {selectedBatch ? (
+              <Box>
+                <Typography variant="h6">第 {state.batches.indexOf(selectedBatch) + 1} 批 · {revisionLabel(selectedBatch.color)} 改过的场次</Typography>
+                <Typography variant="body2" color="text.secondary" mb={2}>共 {selectedBatch.sceneIds.length} 场{deletedCount > 0 ? `，其中 ${deletedCount} 场已删除` : ''}</Typography>
+                <Divider />
+                <Box className="outline-grid" mt={2}>
+                  {selectedScenes.map((scene) => <SceneCard key={scene.id} scene={scene} query="" active={scene.id === selectedScene?.id} onOpen={() => openScene(scene.id)} />)}
+                </Box>
+                {!selectedScenes.length && <Alert severity="info" sx={{ mt: 2 }}>这一批没有可显示的场次。</Alert>}
+              </Box>
+            ) : (
+              <Typography color="text.secondary">选择左侧批次，查看该批动过的场次。</Typography>
+            )}
+          </Paper>
+        </Box>
+      </Box>
+    )
+  }
+
   function renderVersions() {
     return (
       <Box>
@@ -418,7 +481,7 @@ export default function App() {
           <Box>
             <Typography className="eyebrow">VERSION CONTROL</Typography>
             <Typography variant="h4">版本差异</Typography>
-            <Typography color="text.secondary">冻结当前剧本，或把历史版本与当前工作稿逐字段比较。</Typography>
+            <Typography color="text.secondary">冻结当前剧本，或把历史版本与当前工作稿逐字段比较；恢复版本时修订批次进度一并回退。</Typography>
           </Box>
           <Button variant="contained" startIcon={<Save />} onClick={() => setVersionDialog(true)}>保存版本</Button>
         </Stack>
@@ -443,7 +506,7 @@ export default function App() {
                 <Typography variant="h6">{selectedVersion ? `${selectedVersion.name} → 当前工作稿` : '等待选择版本'}</Typography>
                 <Typography variant="body2" color="text.secondary">{diff.length} 处字段差异</Typography>
               </Box>
-              {selectedVersion && <Button onClick={() => store.restoreVersion(selectedVersion.id)}>恢复此版本</Button>}
+              {selectedVersion && <Button onClick={() => store.restoreVersion(selectedVersion.id)}>恢复此版本（含批次进度）</Button>}
             </Stack>
             <Divider />
             <Box className="diff-list">
@@ -501,6 +564,7 @@ export default function App() {
         <span>{store.saveStatus === 'saved' ? '● 已保存到本机' : '◌ 正在保存'}</span>
         <span>{state.script.scenes.length} 场 / {state.script.scenes.reduce((total, scene) => total + scene.pageLength, 0).toFixed(2)} 页</span>
         <span className={pendingWarnings.length ? 'attention' : ''}>{pendingWarnings.length} 条问题待审</span>
+        <span>{activeBatch ? `当前批次：${revisionLabel(activeBatch.color)} · 已改 ${activeBatch.sceneIds.length} 场` : '未开启修订批次'}</span>
         <span>所有修改自动保存在浏览器本地</span>
       </Box>
 
@@ -525,6 +589,7 @@ export default function App() {
       <Tabs value={view} onChange={(_, value) => setView(value)} variant="scrollable" className="view-tabs">
         <Tab value="outline" label="大纲视图" />
         <Tab value="detail" label="场景详情" />
+        <Tab value="batches" label={<Badge badgeContent={state.batches.length} color="secondary"><span className="tab-label">修订批次</span></Badge>} />
         <Tab value="warnings" label={<Badge badgeContent={pendingWarnings.length} color="warning"><span className="tab-label">警告审阅</span></Badge>} />
         <Tab value="versions" label={<Badge badgeContent={state.versions.length} color="secondary"><span className="tab-label">版本差异</span></Badge>} />
       </Tabs>
@@ -549,6 +614,7 @@ export default function App() {
         )}
         {view === 'outline' && renderOutline()}
         {view === 'detail' && renderSceneDetail()}
+        {view === 'batches' && renderBatches()}
         {view === 'warnings' && renderWarnings()}
         {view === 'versions' && renderVersions()}
       </Box>
@@ -651,7 +717,7 @@ export default function App() {
       <Dialog open={versionDialog} onClose={() => setVersionDialog(false)} fullWidth maxWidth="sm">
         <DialogTitle>保存剧本版本</DialogTitle>
         <DialogContent>
-          <Typography color="text.secondary" mb={2}>版本会保存当前全部场景、资料库和审阅备注的快照，之后可与工作稿比较或恢复。</Typography>
+          <Typography color="text.secondary" mb={2}>版本会保存当前全部场景、资料库、修订批次和审阅备注的快照，之后可与工作稿比较或恢复。</Typography>
           <TextField autoFocus fullWidth label="版本名称" value={versionName} onChange={(event) => setVersionName(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') createVersion() }} />
         </DialogContent>
         <DialogActions><Button onClick={() => setVersionDialog(false)}>取消</Button><Button variant="contained" onClick={createVersion}>保存</Button></DialogActions>

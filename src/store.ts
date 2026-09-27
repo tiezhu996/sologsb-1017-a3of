@@ -1,22 +1,40 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { sampleScript } from './sample'
-import type { Character, ContinuityState, DiffItem, Prop, Reply, Scene, Script, Version, Wardrobe, WarningItem, WarningReview } from './types'
+import type { Character, ContinuityState, DiffItem, Prop, Reply, RevisionBatch, RevisionColor, Scene, Script, Version, Wardrobe, WarningItem, WarningReview } from './types'
 
 const STORAGE_KEY = 'sologsb-1017-continuity-v1'
 const clone = <T,>(value: T): T => structuredClone(value)
 const id = (prefix: string) => `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`
+
+export const REVISION_SEQUENCE: RevisionColor[] = ['white', 'blue', 'pink', 'yellow', 'green', 'goldenrod', 'buff', 'salmon', 'cherry']
+
+function nextBatchColor(batches: RevisionBatch[]): RevisionColor {
+  const lastColor = batches.length ? batches[batches.length - 1].color : 'white'
+  return REVISION_SEQUENCE[(REVISION_SEQUENCE.indexOf(lastColor) + 1) % REVISION_SEQUENCE.length]
+}
+
+function touchedSceneIds(before: Script, after: Script): string[] {
+  const beforeById = new Map(before.scenes.map((scene) => [scene.id, scene]))
+  const comparable = (scene: Scene) => JSON.stringify({ ...scene, revision: 'white' })
+  return after.scenes
+    .filter((scene) => {
+      const previous = beforeById.get(scene.id)
+      return !previous || comparable(previous) !== comparable(scene)
+    })
+    .map((scene) => scene.id)
+}
 
 function initialState(): ContinuityState {
   try {
     const raw = localStorage.getItem(STORAGE_KEY)
     if (raw) {
       const parsed = JSON.parse(raw) as ContinuityState
-      if (parsed.script?.scenes?.length) return parsed
+      if (parsed.script?.scenes?.length) return { ...parsed, batches: parsed.batches ?? [], activeBatchId: parsed.activeBatchId ?? null }
     }
   } catch {
     // Ignore an invalid local draft and restore the bundled example.
   }
-  return { script: clone(sampleScript), reviews: {}, versions: [], updatedAt: new Date().toISOString() }
+  return { script: clone(sampleScript), reviews: {}, versions: [], batches: [], activeBatchId: null, updatedAt: new Date().toISOString() }
 }
 
 export function deriveWarnings(script: Script): WarningItem[] {
@@ -156,10 +174,21 @@ export function useContinuityStore() {
     setState((previous) => {
       const next = clone(previous.script)
       mutator(next)
+      let { batches } = previous
+      const activeBatch = batches.find((batch) => batch.id === previous.activeBatchId)
+      if (activeBatch) {
+        const touched = touchedSceneIds(previous.script, next)
+        if (touched.length) {
+          next.scenes.forEach((scene) => { if (touched.includes(scene.id)) scene.revision = activeBatch.color })
+          batches = batches.map((batch) => batch.id === activeBatch.id
+            ? { ...batch, sceneIds: Array.from(new Set([...batch.sceneIds, ...touched])) }
+            : batch)
+        }
+      }
       undoRef.current.push(clone(previous.script))
       if (undoRef.current.length > 80) undoRef.current.shift()
       redoRef.current = []
-      return { ...previous, script: next, updatedAt: new Date().toISOString() }
+      return { ...previous, script: next, batches, updatedAt: new Date().toISOString() }
     })
   }, [])
 
@@ -307,21 +336,49 @@ export function useContinuityStore() {
   }, [])
 
   const createVersion = useCallback((name: string) => {
-    const version: Version = { id: id('version'), name: name.trim() || `版本 ${state.versions.length + 1}`, createdAt: new Date().toISOString(), script: clone(state.script) }
+    const version: Version = {
+      id: id('version'),
+      name: name.trim() || `版本 ${state.versions.length + 1}`,
+      createdAt: new Date().toISOString(),
+      script: clone(state.script),
+      batches: clone(state.batches),
+      activeBatchId: state.activeBatchId
+    }
     setState((previous) => ({ ...previous, versions: [version, ...previous.versions] }))
     return version
-  }, [state.script, state.versions.length])
+  }, [state.script, state.batches, state.activeBatchId, state.versions.length])
 
   const restoreVersion = useCallback((versionId: string) => {
-    const version = state.versions.find((item) => item.id === versionId)
-    if (!version) return
-    mutate((script) => { Object.assign(script, clone(version.script)) })
-  }, [mutate, state.versions])
+    setState((previous) => {
+      const version = previous.versions.find((item) => item.id === versionId)
+      if (!version) return previous
+      undoRef.current.push(clone(previous.script))
+      if (undoRef.current.length > 80) undoRef.current.shift()
+      redoRef.current = []
+      return {
+        ...previous,
+        script: clone(version.script),
+        batches: clone(version.batches ?? []),
+        activeBatchId: version.activeBatchId ?? null,
+        updatedAt: new Date().toISOString()
+      }
+    })
+  }, [])
+
+  const startRevisionBatch = useCallback(() => {
+    const batch: RevisionBatch = { id: id('batch'), color: nextBatchColor(state.batches), startedAt: new Date().toISOString(), sceneIds: [] }
+    setState((previous) => ({ ...previous, batches: [...previous.batches, batch], activeBatchId: batch.id, updatedAt: new Date().toISOString() }))
+    return batch
+  }, [state.batches])
 
   const reset = useCallback(() => {
-    mutate((script) => { Object.assign(script, clone(sampleScript)) })
-    setState((previous) => ({ ...previous, reviews: {} }))
-  }, [mutate])
+    setState((previous) => {
+      undoRef.current.push(clone(previous.script))
+      if (undoRef.current.length > 80) undoRef.current.shift()
+      redoRef.current = []
+      return { ...previous, script: clone(sampleScript), reviews: {}, batches: [], activeBatchId: null, updatedAt: new Date().toISOString() }
+    })
+  }, [])
 
   return {
     state,
@@ -344,6 +401,7 @@ export function useContinuityStore() {
     addReply,
     createVersion,
     restoreVersion,
+    startRevisionBatch,
     undo,
     redo,
     reset
