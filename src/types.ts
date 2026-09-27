@@ -76,17 +76,31 @@ export interface WarningReview {
   replies: Reply[]
 }
 
+export interface RevisionBatch {
+  id: string
+  color: RevisionColor
+  startedAt: string
+  sceneIds: string[]
+}
+
+export interface RevisionState {
+  batches: RevisionBatch[]
+  activeBatchId: string
+}
+
 export interface Version {
   id: string
   name: string
   createdAt: string
   script: Script
+  revision?: RevisionState
 }
 
 export interface ContinuityState {
   script: Script
   reviews: Record<string, WarningReview>
   versions: Version[]
+  revision: RevisionState
   updatedAt: string
 }
 
